@@ -1,0 +1,51 @@
+-- ssh.lua
+local component = require("component")
+local event = require("event")
+local modem = component.modem
+local serialization = require("serialization")
+
+local PORT = 2222
+local TIMEOUT = 5  -- Таймаут на ответ сервера
+
+-- Проверка аргумента
+local server = ...
+if not server then
+    print("Usage: ssh <server-uuid>")
+    return
+end
+
+-- Ввод пароля
+io.write("Password: ")
+local password = io.read("*l")
+
+modem.open(PORT)
+
+-- REPL
+while true do
+    io.write("> ")
+    local cmd = io.read("*l")
+    if not cmd or cmd == "exit" then break end
+
+    -- Формируем сообщение
+    local msg = serialization.serialize({password = password, cmd = cmd})
+    modem.send(server, PORT, msg)
+
+    -- Ждём ответ
+    local _, _, _, _, _, response = event.pull(TIMEOUT, "modem_message")
+    
+    if response then
+        -- Распаковываем и выводим строки
+        local ok, out = pcall(serialization.unserialize, response)
+        if ok and type(out) == "table" then
+            for i=1,#out do
+                print(out[i])
+            end
+        else
+            print("Invalid response")
+        end
+    else
+        -- Таймаут — сервер не ответил
+        print("Connection lost!")
+        break -- прекращаем ssh-сессию
+    end
+end
