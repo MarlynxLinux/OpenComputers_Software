@@ -1,0 +1,77 @@
+-- sshd.lua
+local component = require("component")
+local event = require("event")
+local shell = require("shell")
+local computer = require("computer")
+local serialization = require("serialization")
+local modem = component.modem
+local fs = require("filesystem")
+
+-- Настройки
+local PORT = 2222
+local PASSWORD = "1234"
+modem.open(PORT)
+
+-- Список запрещённых команд
+local blocked_commands = {
+    ["edit"] = true,
+    ["top"] = true,
+    ["lua"] = true,
+    ["reboot"] = true,
+    ["shutdown"] = true
+}
+
+print("SSH server started on port " .. PORT)
+print("Server will automatically stop after 5 minutes of inactivity.")
+
+-- Время последней активности (секунды)
+local lastActivity = computer.uptime()
+local TIMEOUT_IDLE = 300  -- 5 минут
+
+local running = true
+while running do
+    local e, _, from, port, _, msg = event.pull(0.1, "modem_message")
+
+    -- Проверка таймаута простоя
+    if computer.uptime() - lastActivity >= TIMEOUT_IDLE then
+        print("No activity for 5 minutes. Stopping SSH server.")
+        break
+    end
+
+    if e == "modem_message" and port == PORT and msg then
+        lastActivity = computer.uptime()  -- обновляем время активности
+        local ok, request = pcall(serialization.unserialize, msg)
+        if ok and type(request) == "table" then
+            if request.password == PASSWORD and request.cmd then
+                -- Проверяем запрещённые команды
+                local cmd_name = request.cmd:match("^(%S+)")
+                if blocked_commands[cmd_name] then
+                    local response = serialization.serialize({"Command '" .. cmd_name .. "' is blocked"})
+                    modem.send(from, PORT, response)
+                else
+                    -- Выполняем команду через временный файл
+                    local tmpfile = "/tmp/ssh_output.txt"
+                    if fs.exists(tmpfile) then fs.remove(tmpfile) end
+                    local fullcmd = request.cmd .. " > " .. tmpfile .. " 2>&1"
+                    local success, err = pcall(shell.execute, fullcmd)
+
+                    local buffer = {}
+                    local f = io.open(tmpfile, "r")
+                    if f then
+                        for line in f:lines() do table.insert(buffer, line) end
+                        f:close()
+                        fs.remove(tmpfile)
+                    end
+                    if not success then table.insert(buffer, tostring(err)) end
+
+                    modem.send(from, PORT, serialization.serialize(buffer))
+                end
+            else
+                modem.send(from, PORT, serialization.serialize({"Auth failed"}))
+            end
+        end
+    end
+end
+
+print("SSH server stopped.")
+modem.close(PORT)
